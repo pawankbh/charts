@@ -71,11 +71,11 @@ persistence:
   database:
     # storageClass: "-"
     accessMode: ReadWriteOnce
-    size: 1Gi
+    size: 10Gi
   flowStorage:
     # storageClass: "-"
     accessMode: ReadWriteOnce
-    size: 1Gi
+    size: 10Gi
 
 resources: {}
   # We usually recommend not to specify default resources and to leave this as a conscious
