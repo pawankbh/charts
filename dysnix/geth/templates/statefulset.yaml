@@ -1,25 +1,41 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ template "geth.fullname" . }}
+  name: {{ include "geth.fullname" . }}
   labels:
-    app: {{ template "geth.name" . }}
-    chart: {{ template "geth.chart" . }}
-    release: {{ .Release.Name }}
-    heritage: {{ .Release.Service }}
+    {{- include "geth.labels" . | nindent 4 }}
 spec:
   serviceName: {{ template "geth.name" . }}
+  updateStrategy:
+    {{- toYaml .Values.updateStrategy | nindent 4 }}
   selector:
     matchLabels:
-      app: {{ template "geth.name" . }}
-      release: {{ .Release.Name }}
+      {{- include "geth.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if or .Values.syncToS3.enabled .Values.initFromS3.enabled }}
+        checksum/s3-secret: {{ include (print $.Template.BasePath "/s3-secret.yaml") . | sha256sum }}
+        checksum/s3-configmap: {{ include (print $.Template.BasePath "/s3-configmap.yaml") . | sha256sum }}
+        {{- end }}
       labels:
-        app: {{ template "geth.name" . }}
-        release: {{ .Release.Name }}
-        {{- include "geth.statefulset.annotations" . | nindent 8 }}
+        {{- include "geth.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podStatusLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
+      enableServiceLinks: {{ .Values.enableServiceLinks }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "geth.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 10 }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -33,50 +49,148 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-      - name: remove-lock
+      {{- if .Values.initFromS3.enabled }}
+      {{- with .Values.s3config }}
+      - name: init-from-s3
+        image: "{{ .image.repository }}:{{ .image.tag }}"
+        imagePullPolicy: {{ .image.pullPolicy | quote }}
         command:
-        - rm
-        - -f
-        - /root/.ethereum/geth/LOCK
-        image: busybox
-        imagePullPolicy: IfNotPresent
+        - sh
+        - /scripts/init-from-s3.sh
+        envFrom:
+        - configMapRef:
+            name: {{ include "geth.fullname" $ }}-s3-config
+        - secretRef:
+            name: {{ include "geth.fullname" $ }}-s3-secret
         volumeMounts:
+        - name: scripts
+          mountPath: /scripts
         - name: data
-          mountPath: /root
-      - name: remove-nodekey
-        command:
-        - rm
-        - -f
-        - /root/.ethereum/geth/nodekey
-        image: busybox
-        imagePullPolicy: IfNotPresent
-        volumeMounts:
-        - name: data
-          mountPath: /root
-      containers:
-      {{- if .Values.proxy.enabled }}
-      - name: {{ template "geth.fullname" . }}-proxy
-        image: "{{ .Values.proxy.image.repository }}:{{ .Values.proxy.image.tag }}"
-        imagePullPolicy: {{ .Values.proxy.image.pullPolicy | quote }}
-        ports:
-        - name: proxy-rpc
-          containerPort: {{ .Values.proxy.http.port }}
-        - name: proxy-ws
-          containerPort: {{ .Values.proxy.ws.port }}
-        env:
-        - name: OTP_SECRET
-          value: {{ .Values.proxy.otpSecret | quote }}
+          mountPath: /root/.ethereum
       {{- end }}
-      - name: {{ template "geth.fullname" . }}
+      {{- end }}
+      {{- if .Values.syncToS3.enabled }}
+      {{- with .Values.s3config }}
+      - name: sync-to-s3
+        image: "{{ .image.repository }}:{{ .image.tag }}"
+        imagePullPolicy: {{ .image.pullPolicy | quote }}
+        command:
+        - /bin/sh
+        - /scripts/sync-to-s3.sh
+        envFrom:
+        - configMapRef:
+            name: {{ include "geth.fullname" $ }}-s3-config
+        - secretRef:
+            name: {{ include "geth.fullname" $ }}-s3-secret
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        - name: data
+          mountPath: /root/.ethereum
+      {{- end }}
+      {{- with .Values.syncToS3.cronjob }}
+      {{- if .enabled }}
+      - name: disable-sync-to-s3
+        image: "{{ .image.repository }}:{{ .image.tag }}"
+        imagePullPolicy: {{ .image.pullPolicy | quote }}
+        command:
+        - /bin/sh
+        - /scripts/s3-cron.sh
+        - disable_sync
+        - 5s
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- with .Values.extraInitContainers }}
+        {{- tpl (toYaml . | nindent 6) $ }}
+      {{- end }}
+      containers:
+      {{- with .Values.sidecarContainers }}
+        {{- tpl (toYaml . | nindent 6) $ }}
+      {{- end }}
+      - name: geth
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
         imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
-        command: ["/usr/local/bin/geth"]
-        args: {{- include "geth.args" . | nindent 10 }}
+        {{- with .Values.securityContext }}
+        securityContext:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.command }}
+        command:
+          {{- tpl (toYaml .) $ | nindent 10 }}
+        {{- end }}
+        args:
+        {{- with .Values.config.eth.network }}
+        - --{{ . }}
+        {{- end }}
+        - --config=/config/config.toml
+        {{- with .Values.config.node.p2p.nat }}
+        - --nat={{ . }}
+        {{- end }}
+        {{- with .Values.config.cache }}
+        - --cache={{ . }}
+        {{- end }}
+        - --verbosity={{ .Values.config.verbosity }}
+        {{- with .Values.config.vmodule }}
+        - --log.vmodule={{ join "," . }}
+        {{- end }}
+        {{- if .Values.config.metrics.enabled }}
+        - --metrics
+        - --metrics.addr=0.0.0.0
+        - --metrics.port={{ .Values.config.metrics.port }}
+        {{- if .Values.config.metrics.expensive }}
+        - --metrics.expensive
+        {{- end }}
+        {{- end }}
+        {{- if .Values.config.pprof.enabled }}
+        - --pprof
+        - --pprof.addr=0.0.0.0
+        - --pprof.port={{ .Values.config.pprof.port }}
+        {{- end }}
+        {{- with .Values.extraArgs }}
+        {{- tpl (toYaml .) $ | nindent 8 }}
+        {{- end }}
         ports:
-        - name: rpc
-          containerPort: {{ .Values.http.port }}
+        - name: http
+          containerPort: {{ .Values.config.node.http.port }}
+        - name: authrpc
+          containerPort: {{ .Values.config.node.authrpc.port }}
+        {{- if .Values.config.node.ws.enabled }}
         - name: ws
-          containerPort: {{ .Values.ws.port }}
+          containerPort: {{ .Values.config.node.ws.port }}
+        {{- end }}
+        {{- if .Values.config.metrics.enabled }}
+        - name: metrics
+          containerPort: {{ .Values.config.metrics.port }}
+        {{- end }}
+        {{- if .Values.config.pprof.enabled }}
+        - name: pprof
+          containerPort: {{ .Values.config.pprof.port }}
+        {{- end }}
+        - name: p2p-tcp
+          containerPort: {{ .Values.config.node.p2p.port }}
+          {{- if .Values.config.node.p2p.useHostPort }}
+          hostPort: {{ .Values.config.node.p2p.port }}
+          {{- end }}
+          protocol: TCP
+        - name: p2p-udp
+          containerPort: {{ .Values.config.node.p2p.discoveryPort }}
+          {{- if .Values.config.node.p2p.useHostPort }}
+          hostPort: {{ .Values.config.node.p2p.discoveryPort }}
+          {{- end }}
+          protocol: UDP
+        volumeMounts:
+        - name: config
+          mountPath: /config
+        - name: data
+          mountPath: /root/.ethereum
+        - name: secrets
+          mountPath: /secrets
+        - name: scripts
+          mountPath: /scripts
         {{- if .Values.livenessProbe.enabled }}
         livenessProbe:
           {{- if and .Values.livenessProbe.exec (kindIs "string" .Values.livenessProbe.exec.command) }}
@@ -99,30 +213,45 @@ spec:
           {{- omit .Values.readinessProbe "enabled" | toYaml | nindent 10 }}
           {{- end }}
         {{- end }}
-        volumeMounts:
-        - name: data
-          mountPath: /root
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
+      volumes:
+      - name: secrets
+        secret:
+          secretName: {{ template "geth.fullname" . }}
+      - name: scripts
+        configMap:
+          name: {{ template "geth.fullname" . }}-scripts
+      - name: config
+        configMap:
+          name: {{ template "geth.fullname" . }}-config
+      {{- if eq .Values.persistence.type "hostPath" }}
+      - name: data
+        hostPath:
+          path: {{ .Values.persistence.hostPath.path }}
+          type: {{ .Values.persistence.hostPath.type }}
+      {{- end }}
+  {{- if eq .Values.persistence.type "pvc" }}
   volumeClaimTemplates:
   - metadata:
       name: data
-      annotations:
-        "helm.sh/resource-policy": keep
       labels:
-        app: {{ template "geth.name" . }}
-        chart: {{ template "geth.chart" . }}
-        release: {{ .Release.Name }}
-        heritage: {{ .Release.Service }}
-        {{- if .Values.persistence.snapshotValue }}
-        snapshot: {{ .Values.persistence.snapshotValue }}
-        {{- end }}
+        {{- include "geth.selectorLabels" . | nindent 8 }}
+      {{- with .Values.persistence.pvc.annotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       accessModes:
-      - "ReadWriteOnce"
-      {{- if .Values.persistence.storageClassName }}
-      storageClassName: {{ .Values.persistence.storageClassName | quote }}
+      - {{ .Values.persistence.pvc.accessMode }}
+      {{- if .Values.persistence.pvc.storageClass }}
+      {{- if eq .Values.persistence.pvc.storageClass "-" }}
+      storageClassName: ""
+      {{- else }}
+      storageClassName: {{ .Values.persistence.pvc.storageClass | quote }}
+      {{- end }}
       {{- end }}
       resources:
         requests:
-          storage: {{ .Values.persistence.size | quote }}
+          storage: {{ .Values.persistence.pvc.size | quote }}
+  {{- end }}

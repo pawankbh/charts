@@ -43,3 +43,22 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
+
+{{/*
+Create the name of the service account to use
+*/}}
+{{- define "bsc.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (include "bsc.fullname" .) .Values.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{- define "bsc.scaleTriggerName" -}}
+{{- printf "%s-%s" (include "bsc.fullname" .) "s-t" -}}
+{{- end }}
+
+{{- define "bsc.scaleHelperrName" -}}
+{{- printf "%s-%s" (include "bsc.fullname" .) "s-h" -}}
+{{- end }}

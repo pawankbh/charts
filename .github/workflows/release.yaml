@@ -3,7 +3,7 @@ name: Release Charts
 on:
   push:
     branches:
-      - master
+      - main
 
 jobs:
   release:
@@ -17,9 +17,14 @@ jobs:
           git config user.name "$GITHUB_ACTOR"
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
 
+      - name: Add repositories
+        run: |
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm repo add bitnami-archive https://raw.githubusercontent.com/bitnami/charts/archive-full-index/bitnami
+
       - name: Run chart-releaser
-        uses: ccremer/chart-releaser-action@ignore-dirs
+        uses: helm/chart-releaser-action@v1.6.0
         with:
           charts_dir: dysnix/
         env:
-          CR_TOKEN: "${{ secrets.CR_TOKEN }}"
+          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
